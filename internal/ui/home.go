@@ -1995,6 +1995,14 @@ func (h *Home) publishWebMenuSnapshot() {
 	copy(instancesCopy, h.instances)
 	h.instancesMu.RUnlock()
 
+	// The web menu is the ACTIVE list — archived sessions are served separately
+	// by GET /api/sessions/archived. SessionDataService.LoadMenuSnapshot already
+	// filters on the storage path; this in-memory publish path did not, so the
+	// sidebar listed archived sessions and every group badge reported the
+	// unarchived total (a deck with 179 of 279 archived served "church (39)"
+	// over 11 live sessions).
+	instancesCopy = session.FilterInstancesByArchive(instancesCopy, false)
+
 	groupTreeCopy := h.groupTree.ShallowCopyForSave()
 	groupsData := make([]*session.GroupData, 0, len(groupTreeCopy.GroupList))
 	for _, g := range groupTreeCopy.GroupList {
@@ -3898,6 +3906,11 @@ type sessionRenderState struct {
 	title        string // Instance.Title at snapshot time
 	autoName     bool   // session displays a captured/live task description
 	autoNameDesc string // last persisted auto-name description (fallback when paneTitle empty)
+	// archived mirrors Instance.IsArchived() at snapshot time. The header status
+	// pills and group header counts are derived from this snapshot, and archived
+	// sessions are hidden from the active list — so counting them made a deck
+	// that had just been bulk-archived still read "267 error" while showing ~68.
+	archived bool
 }
 
 // displaySessionTitle returns the label to render for a session row. For an
@@ -4040,6 +4053,7 @@ func (h *Home) refreshSessionRenderSnapshot(instances []*session.Instance) {
 			title:        inst.GetTitleThreadSafe(),
 			autoName:     inst.GetAutoName(),
 			autoNameDesc: inst.GetAutoNameDescription(),
+			archived:     inst.IsArchived(),
 		}
 		// Look up pane title from the already-refreshed tmux cache.
 		// Only RefreshPaneInfoCache (called from backgroundStatusUpdate) keeps
@@ -13638,6 +13652,12 @@ func (h *Home) countSessionStatuses() (running, waiting, idle, stopped, errored 
 		snapshot = h.getSessionRenderSnapshot()
 	}
 	for _, state := range snapshot {
+		// Archived sessions are hidden from the active list, so counting them in
+		// the header pills reports a deck the user cannot see. The archived view
+		// (^) has its own list; these pills describe the active one.
+		if state.archived {
+			continue
+		}
 		switch state.status {
 		case session.StatusRunning:
 			running++
@@ -16055,15 +16075,23 @@ func (h *Home) buildGroupRenderStats(snapshot map[string]sessionRenderState) map
 		return stats
 	}
 
+	viewArchived := h.statusFilter == FilterModeArchived
+
 	for path, g := range h.groupTree.Groups {
 		if g == nil {
 			continue
 		}
 
-		directSessions := len(g.Sessions)
+		// Count only the sessions the current view actually renders:
+		// rebuildFlatItems partitions archived vs active, so a header reading
+		// "NewChio (64)" above 24 visible rows is counting a list the user is
+		// not looking at. In the archived view (^) the header describes the
+		// archived sessions instead.
+		visible := session.FilterInstancesByArchive(g.Sessions, viewArchived)
+		directSessions := len(visible)
 		directRunning := 0
 		directWaiting := 0
-		for _, sess := range g.Sessions {
+		for _, sess := range visible {
 			state, ok := snapshot[sess.ID]
 			status := sess.Status
 			if ok {
@@ -18808,12 +18836,17 @@ func (h *Home) renderGroupPreview(group *session.Group, width, height int) strin
 	countStyle := lipgloss.NewStyle().
 		Foreground(ColorText).
 		Bold(true)
-	b.WriteString(countStyle.Render(fmt.Sprintf("%d sessions", len(group.Sessions))))
+	// Count only what the current view lists (see buildGroupRenderStats): with
+	// archived sessions hidden, "39 sessions / ✕ 38 error" over 11 visible rows
+	// misreports the group.
+	viewArchived := h.statusFilter == FilterModeArchived
+	visible := session.FilterInstancesByArchive(group.Sessions, viewArchived)
+	b.WriteString(countStyle.Render(fmt.Sprintf("%d sessions", len(visible))))
 	b.WriteString("\n\n")
 
 	// Status breakdown with inline badges
 	running, waiting, idle, stopped, errored := 0, 0, 0, 0, 0
-	for _, sess := range group.Sessions {
+	for _, sess := range visible {
 		switch sess.Status {
 		case session.StatusRunning:
 			running++
@@ -18897,8 +18930,8 @@ func (h *Home) renderGroupPreview(group *session.Group, width, height int) strin
 	b.WriteString(renderSectionDivider("Sessions", width-4))
 	b.WriteString("\n")
 
-	// Session list (compact)
-	if len(group.Sessions) == 0 {
+	// Session list (compact) -- `visible` only, matching the active/archived view.
+	if len(visible) == 0 {
 		emptyStyle := lipgloss.NewStyle().Foreground(ColorText).Italic(true)
 		b.WriteString(emptyStyle.Render("  No sessions in this group"))
 		b.WriteString("\n")
@@ -18907,9 +18940,9 @@ func (h *Home) renderGroupPreview(group *session.Group, width, height int) strin
 		if maxShow < 3 {
 			maxShow = 3
 		}
-		for i, sess := range group.Sessions {
+		for i, sess := range visible {
 			if i >= maxShow {
-				remaining := len(group.Sessions) - i
+				remaining := len(visible) - i
 				b.WriteString(DimStyle.Render(fmt.Sprintf("  ... +%d more", remaining)))
 				break
 			}

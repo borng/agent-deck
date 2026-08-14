@@ -146,6 +146,13 @@ func handleGroupList(profile string, args []string) {
 		os.Exit(1)
 	}
 
+	// Archived sessions are hidden from the active list everywhere else, so
+	// counting them here reports a deck the user cannot see: a profile with
+	// 179 of 279 sessions archived listed "NewChio 64" against 24 live ones.
+	// Filtering before the status refresh also skips probing tmux for
+	// sessions that are archived precisely because they are finished.
+	instances = session.FilterInstancesByArchive(instances, false)
+
 	// Warm tmux pane-title cache + load hook statuses once up-front so
 	// the per-status counts below match the TUI and /api/menu view
 	// (issue #610). Without this the nested UpdateStatus calls each run
@@ -403,6 +410,11 @@ func handleGroupShow(profile string, args []string) {
 		out.Error(fmt.Sprintf("failed to load sessions: %v", err), ErrCodeNotFound)
 		os.Exit(1)
 	}
+
+	// Show the active list, matching `group list` and the TUI/web views.
+	// Group lookup below is unaffected: groups come from groupsData, not from
+	// the instances, so a group whose sessions are all archived still resolves.
+	instances = session.FilterInstancesByArchive(instances, false)
 
 	groupTree := session.NewGroupTreeWithGroups(instances, groups)
 
